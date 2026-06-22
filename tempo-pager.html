@@ -819,6 +819,9 @@ function updateVisualPosition(force){
     isPlaying = false;
     stopScheduler();
     stopRAF();
+    // Release scroll lock so user can freely scroll after piece ends
+    userScrolling = false;
+    clearTimeout(userScrollTimer);
     updateTransportUI();
   }
 }
@@ -900,6 +903,8 @@ prevBtn.addEventListener('click', ()=> nudge(-1));
 document.getElementById('restart-btn').addEventListener('click', ()=>{
   if(isPlaying){ isPlaying = false; stopScheduler(); stopRAF(); }
   elapsedBeatsAtStart = 0;
+  userScrolling = false;
+  clearTimeout(userScrollTimer);
   currentPageDisplayed = -1;
   updateVisualPosition(true);
   updateTransportUI();
@@ -942,26 +947,45 @@ let programmaticScroll = false;
 let userScrolling = false;
 let userScrollTimer = null;
 
-// User touches the stage — pause auto-scroll
-stage.addEventListener('touchstart', ()=>{
-  if(state.mode !== 'scroll') return;
-  userScrolling = true;
-  clearTimeout(userScrollTimer);
-}, { passive: true });
-
-// User lifts finger — sync clock then resume auto-scroll after 1s
-stage.addEventListener('touchend', ()=>{
-  if(state.mode !== 'scroll') return;
-  clearTimeout(userScrollTimer);
-  // sync beat clock to current scroll position
+function syncClockToScroll(){
   const maxScroll = Math.max(1, stage.scrollHeight - stage.clientHeight);
   const progress = stage.scrollTop / maxScroll;
   const newBeats = clampNum(progress * state.totalBeats, 0, state.totalBeats);
   elapsedBeatsAtStart = newBeats;
   if(isPlaying) playStartAudioTime = audioCtx.currentTime;
   nextClickBeatIndex = Math.ceil(elapsedBeatsAtStart - 1e-9);
-  // resume auto-scroll after 1s
-  userScrollTimer = setTimeout(()=>{ userScrolling = false; }, 1000);
+}
+
+function beginUserScroll(){
+  if(state.mode !== 'scroll') return;
+  userScrolling = true;
+  clearTimeout(userScrollTimer);
+}
+
+function endUserScroll(){
+  if(state.mode !== 'scroll') return;
+  // Sync clock immediately so metronome doesn't jump
+  syncClockToScroll();
+  clearTimeout(userScrollTimer);
+  // Resume auto-scroll after 0.5s
+  userScrollTimer = setTimeout(()=>{ userScrolling = false; }, 500);
+}
+
+// Touch (iPad)
+stage.addEventListener('touchstart', beginUserScroll, { passive: true });
+stage.addEventListener('touchend', endUserScroll, { passive: true });
+stage.addEventListener('touchcancel', endUserScroll, { passive: true });
+
+// Mouse wheel (desktop)
+stage.addEventListener('wheel', ()=>{
+  if(state.mode !== 'scroll') return;
+  beginUserScroll();
+  clearTimeout(userScrollTimer);
+  // wheel fires repeatedly; end once wheel stops
+  userScrollTimer = setTimeout(()=>{
+    syncClockToScroll();
+    userScrollTimer = setTimeout(()=>{ userScrolling = false; }, 500);
+  }, 150);
 }, { passive: true });
 
 stage.addEventListener('scroll', ()=>{
@@ -971,9 +995,6 @@ stage.addEventListener('scroll', ()=>{
     const maxScroll = Math.max(1, stage.scrollHeight - stage.clientHeight);
     const progress = stage.scrollTop / maxScroll;
     const newBeats = clampNum(progress * state.totalBeats, 0, state.totalBeats);
-    elapsedBeatsAtStart = newBeats;
-    if(isPlaying) playStartAudioTime = audioCtx.currentTime;
-    nextClickBeatIndex = Math.ceil(elapsedBeatsAtStart - 1e-9);
     const pageIdx = clampNum(Math.floor(newBeats / (state.beatsPerPage || 1)) + 1, 1, numPages || 1);
     counterReadout.textContent = `${pageIdx} / ${numPages} (${Math.round(progress * 100)}%)`;
   }, 60);
