@@ -487,6 +487,26 @@ function recomputeBeatsPerPage(){
   startBtn.disabled = !(pdfDoc && totalMeasures >= 1 && bpMeasure >= 1);
 }
 
+function saveSettings(){
+  try{
+    localStorage.setItem('tp_bpm', bpmInput.value);
+    localStorage.setItem('tp_beats', beatsPerMeasureInput.value);
+    localStorage.setItem('tp_measures', totalMeasuresInput.value);
+  }catch(e){}
+}
+
+function loadSettings(){
+  try{
+    const bpm = localStorage.getItem('tp_bpm');
+    const beats = localStorage.getItem('tp_beats');
+    const measures = localStorage.getItem('tp_measures');
+    if(bpm) bpmInput.value = bpm;
+    if(beats) beatsPerMeasureInput.value = beats;
+    if(measures) totalMeasuresInput.value = measures;
+  }catch(e){}
+}
+loadSettings();
+
 function showLoading(msg){
   loadingText.textContent = msg;
   loadingOverlay.hidden = false;
@@ -502,7 +522,7 @@ async function loadPdfFile(file){
   pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
   numPages = pdfDoc.numPages;
   pageCountReadout.textContent = `共 ${numPages} 页`;
-  if(!totalMeasuresInput.value){
+  if(!totalMeasuresInput.value || parseInt(totalMeasuresInput.value) < 1){
     totalMeasuresInput.value = numPages * 8;
   }
   scrollRendered = false;
@@ -530,8 +550,17 @@ dropZone.addEventListener('drop', (e)=>{
 });
 
 [beatsPerMeasureInput, totalMeasuresInput].forEach(el=>{
-  el.addEventListener('input', recomputeBeatsPerPage);
+  el.addEventListener('input', ()=>{ recomputeBeatsPerPage(); saveSettings(); });
 });
+
+bpmInput.parentElement.querySelectorAll('button[data-step]').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    const v = clampNum((parseInt(bpmInput.value)||90) + parseInt(b.dataset.step), 20, 300);
+    bpmInput.value = v;
+    saveSettings();
+  });
+});
+bpmInput.addEventListener('change', saveSettings);
 
 setupModeSeg.addEventListener('click', (e)=>{
   const btn = e.target.closest('button[data-mode]');
@@ -540,12 +569,6 @@ setupModeSeg.addEventListener('click', (e)=>{
   setupModeSeg.querySelectorAll('button').forEach(b=> b.classList.toggle('active', b===btn));
 });
 
-bpmInput.parentElement.querySelectorAll('button[data-step]').forEach(b=>{
-  b.addEventListener('click', ()=>{
-    const v = clampNum((parseInt(bpmInput.value)||90) + parseInt(b.dataset.step), 20, 300);
-    bpmInput.value = v;
-  });
-});
 
 /* ---------------------------------------------------------------- *
  *  Start playback session
@@ -774,11 +797,15 @@ function updateVisualPosition(force){
   const pageIdx = clampNum(Math.floor(ebClamped / (state.beatsPerPage || 1)) + 1, 1, numPages || 1);
 
   if(state.mode === 'scroll'){
-    const maxScroll = stage.scrollHeight - stage.clientHeight;
-    programmaticScroll = true;
-    stage.scrollTop = maxScroll > 0 ? progress * maxScroll : 0;
-    requestAnimationFrame(()=>{ programmaticScroll = false; });
-    counterReadout.textContent = `${pageIdx} / ${numPages} (${Math.round(progress * 100)}%)`;
+    const maxScroll = Math.max(1, stage.scrollHeight - stage.clientHeight);
+    // Auto-scroll when playing and user is not manually swiping
+    if(isPlaying && !userScrolling){
+      programmaticScroll = true;
+      stage.scrollTop = maxScroll > 0 ? progress * maxScroll : 0;
+      requestAnimationFrame(()=>{ programmaticScroll = false; });
+    }
+    const dispProgress = maxScroll > 0 ? stage.scrollTop / maxScroll : progress;
+    counterReadout.textContent = `${pageIdx} / ${numPages} (${Math.round(dispProgress * 100)}%)`;
   } else {
     if(pageIdx !== currentPageDisplayed || force){
       currentPageDisplayed = pageIdx;
@@ -912,18 +939,44 @@ stage.addEventListener('pointerup', (e)=>{
 });
 let scrollSyncTimer = null;
 let programmaticScroll = false;
+let userScrolling = false;
+let userScrollTimer = null;
+
+// User touches the stage — pause auto-scroll
+stage.addEventListener('touchstart', ()=>{
+  if(state.mode !== 'scroll') return;
+  userScrolling = true;
+  clearTimeout(userScrollTimer);
+}, { passive: true });
+
+// User lifts finger — sync clock then resume auto-scroll after 1s
+stage.addEventListener('touchend', ()=>{
+  if(state.mode !== 'scroll') return;
+  clearTimeout(userScrollTimer);
+  // sync beat clock to current scroll position
+  const maxScroll = Math.max(1, stage.scrollHeight - stage.clientHeight);
+  const progress = stage.scrollTop / maxScroll;
+  const newBeats = clampNum(progress * state.totalBeats, 0, state.totalBeats);
+  elapsedBeatsAtStart = newBeats;
+  if(isPlaying) playStartAudioTime = audioCtx.currentTime;
+  nextClickBeatIndex = Math.ceil(elapsedBeatsAtStart - 1e-9);
+  // resume auto-scroll after 1s
+  userScrollTimer = setTimeout(()=>{ userScrolling = false; }, 1000);
+}, { passive: true });
+
 stage.addEventListener('scroll', ()=>{
-  if(state.mode !== 'scroll' || isPlaying || programmaticScroll) return;
+  if(state.mode !== 'scroll' || programmaticScroll) return;
   clearTimeout(scrollSyncTimer);
   scrollSyncTimer = setTimeout(()=>{
     const maxScroll = Math.max(1, stage.scrollHeight - stage.clientHeight);
     const progress = stage.scrollTop / maxScroll;
-    elapsedBeatsAtStart = clampNum(progress * state.totalBeats, 0, state.totalBeats);
+    const newBeats = clampNum(progress * state.totalBeats, 0, state.totalBeats);
+    elapsedBeatsAtStart = newBeats;
+    if(isPlaying) playStartAudioTime = audioCtx.currentTime;
     nextClickBeatIndex = Math.ceil(elapsedBeatsAtStart - 1e-9);
-    // update counter without moving scroll
-    const pageIdx = clampNum(Math.floor(elapsedBeatsAtStart / (state.beatsPerPage || 1)) + 1, 1, numPages || 1);
+    const pageIdx = clampNum(Math.floor(newBeats / (state.beatsPerPage || 1)) + 1, 1, numPages || 1);
     counterReadout.textContent = `${pageIdx} / ${numPages} (${Math.round(progress * 100)}%)`;
-  }, 80);
+  }, 60);
 });
 
 bpmStepBtns.forEach(b=>{
